@@ -3,7 +3,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
-import os ,nk
+import os
 from data_loader import load_grh_file, load_export_file
 from io import BytesIO
 from plotly.subplots import make_subplots

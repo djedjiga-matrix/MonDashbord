@@ -8,6 +8,9 @@ from data_loader import load_grh_file, load_export_file
 from io import BytesIO
 from plotly.subplots import make_subplots
 import numpy as np
+from config import initialize_session_state
+from database import Database
+from utils.utils import to_excel_download, display_data_table
 
 def initialize_session_state():
     """Initialise les états de session pour les filtres"""
@@ -31,6 +34,15 @@ st.set_page_config(
 
 # Initialiser l'état de session
 initialize_session_state()
+
+# Initialiser la base de données
+db = Database()
+
+# Vérifier la connexion
+if not db.is_connected():
+    st.warning("⚠️ Mode hors ligne : les données ne seront pas sauvegardées")
+else:
+    st.success("✅ Connecté à la base de données")
 
 def to_excel_download(df):
     """Convertit le DataFrame en fichier Excel téléchargeable"""
@@ -615,270 +627,63 @@ with st.sidebar:
         type=["xlsx"],
         key="export_file_upload"
     )
+    
+    # Ajout des filtres globaux
+    if 'data' in st.session_state:
+        st.header("🔍 Filtres")
+        export_df = st.session_state['data']['export']
+        
+        # Afficher les colonnes disponibles pour le debug
+        st.write("Colonnes disponibles:", export_df.columns.tolist())
+        
+        # Vérifier quelle colonne utiliser pour les ONGs
+        ong_columns = ['ONG', 'pour_client', 'client', 'organisation']
+        ong_column = next((col for col in ong_columns if col in export_df.columns), None)
+        
+        if ong_column:
+            # Convertir toutes les valeurs en string avant le tri
+            ong_values = [str(x) for x in export_df[ong_column].unique() if pd.notna(x)]
+            ong_list = ["Toutes"] + sorted(ong_values)
+            
+            st.selectbox("ONG", ong_list, key="global_ong")
+            st.selectbox("Pourcentage", ['1%', '4%', '6%', '7%', '7.5%', '12%'], key="global_percentage")
+            st.selectbox("Type de campagne", ['PRP', 'PPA'], key="global_type")
+        else:
+            st.warning("⚠️ Aucune colonne d'ONG trouvée dans les données")
 
-# Chargement et traitement des données
+# Après le chargement des données
 if grh_file is not None and export_file is not None:
     try:
-        # Charger les données
-        if 'data' not in st.session_state:
-            st.info("🔄 Chargement des fichiers en cours...")
-            grh_data = load_grh_file(grh_file.read())
-            export_data = load_export_file(export_file.read())
-            
-            st.session_state['data'] = {
-                'grh': grh_data,
-                'export': export_data
-            }
+        st.info("🔄 Chargement des fichiers en cours...")
+        grh_data = load_grh_file(grh_file.read())
+        export_data = load_export_file(export_file.read())
         
-        grh_data = st.session_state['data']['grh']
-        export_data = st.session_state['data']['export']
-        
-        if grh_data is not None and export_data is not None:
-            # Filtres de date
-            with st.sidebar:
-                st.header("📅 Période")
-                
-                if 'CMK_S_FIELD_DATETRAITEMENT' in export_data.columns:
-                    # Convertir la colonne en datetime
-                    export_data['CMK_S_FIELD_DATETRAITEMENT'] = pd.to_datetime(
-                        export_data['CMK_S_FIELD_DATETRAITEMENT'],
-                        format='%Y-%m-%d',
-                        errors='coerce'
-                    )
-                    
-                    # Obtenir les dates min et max
-                    valid_dates = export_data['CMK_S_FIELD_DATETRAITEMENT'].dropna()
-                    if not valid_dates.empty:
-                        min_date = valid_dates.min().date()
-                        max_date = valid_dates.max().date()
-                        
-                        # Sélecteur de dates
-                        dates = st.date_input(
-                            "Sélectionner la période",
-                            value=(min_date, max_date),
-                            min_value=min_date,
-                            max_value=max_date,
-                            key="date_range"
-                        )
-                        
-                        if isinstance(dates, tuple) and len(dates) == 2:
-                            start_date, end_date = dates
-                            
-                            # Mettre à jour les dates dans la session et forcer le rechargement
-                            if (st.session_state.get('start_date') != start_date or 
-                                st.session_state.get('end_date') != end_date):
-                                st.session_state['start_date'] = start_date
-                                st.session_state['end_date'] = end_date
-                                # Forcer le rechargement des données
-                                if 'data' in st.session_state:
-                                    del st.session_state['data']
-                                st.rerun()
-                    else:
-                        st.warning("Aucune date valide trouvée dans les données")
-                        start_date = end_date = None
-                else:
-                    start_date = end_date = None
+        # Sauvegarder les données dans MongoDB
+        if db.save_data(grh_data, 'grh_data'):
+            if db.save_data(export_data, 'export_data'):
+                # Stocker dans la session Streamlit
+                st.session_state['data'] = {
+                    'grh': grh_data,
+                    'export': export_data
+                }
+                st.success("✅ Données chargées et sauvegardées avec succès!")
+            else:
+                st.error("❌ Erreur lors de la sauvegarde des données d'export")
+        else:
+            st.error("❌ Erreur lors de la sauvegarde des données GRH")
             
-            # Créer le tableau de base
-            agent_stats = create_agent_table(export_data, grh_data, start_date, end_date)
-            
-            # Affichage selon la page sélectionnée
-            if page == "Performance Globale":
-                st.header("📊 Performance par Agent")
-                
-                # Colonnes à afficher
-                columns_to_display = [
-                    'ONG', 'agent', 'don avec montant', 'don en ligne', 'pa en ligne', 
-                    'refus argumente', 'Total Cu', 'Total Cu+', 'Tx_Accord_don', 'Tx_Accord_pa',
-                    'Cu\'s/h', 'Total H/prod', 'Total/H presence', 'Total/H Brief'
-                ]
-                
-                # Afficher le tableau
-                st.dataframe(
-                    agent_stats[columns_to_display],
-                    use_container_width=True,
-                    hide_index=True
-                )
-                
-                # Export Excel
-                excel_data = to_excel_download(agent_stats[columns_to_display])
-                st.download_button(
-                    "⬇️ Télécharger les données (Excel)",
-                    excel_data,
-                    "performance_agents.xlsx",
-                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key="download_global"
-                )
-                
-            elif page == "Conquête Don":
-                show_conquest_don_page(agent_stats)
-            elif page == "Conquête PA":
-                show_conquest_pa_page(agent_stats)
-                
-            elif page == "Graphiques":
-                st.title("📈 Analyse Graphique")
-                
-                # Filtres communs dans la sidebar pour tous les onglets
-                with st.sidebar:
-                    st.header("🔍 Filtres d'analyse")
-                    ong_list = ["Toutes"] + sorted(agent_stats['ONG'].unique().tolist())
-                    
-                    # Utiliser les filtres sauvegardés
-                    ong_selected = st.selectbox(
-                        "Sélectionner l'ONG", 
-                        ong_list, 
-                        key="graph_ong",
-                        index=ong_list.index(st.session_state['conquest_filters']['ong'])
-                    )
-                    
-                    # Mettre à jour les filtres sauvegardés
-                    st.session_state['conquest_filters']['ong'] = ong_selected
-                    
-                    # Filtrer les données selon l'ONG
-                    if ong_selected != "Toutes":
-                        filtered_stats = agent_stats[agent_stats['ONG'] == ong_selected].copy()
-                        filtered_export = export_data[export_data['pour_client'] == ong_selected].copy()
-                    else:
-                        filtered_stats = agent_stats.copy()
-                        filtered_export = export_data.copy()
-                
-                # Créer les onglets
-                tabs = st.tabs([
-                    "Performance", 
-                    "Tendances",
-                    "Analyse Horaire",
-                    "Conversion",
-                    "Anomalies"
-                ])
-                
-                # Onglet Performance
-                with tabs[0]:
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        # Convertir les colonnes en numérique
-                        plot_data = filtered_stats.copy()
-                        plot_data['Total Cu'] = pd.to_numeric(plot_data['Total Cu'])
-                        plot_data['Total Cu+'] = pd.to_numeric(plot_data['Total Cu+'])
-                        
-                        fig_compare = px.bar(
-                            plot_data,
-                            x='agent',
-                            y=['Total Cu', 'Total Cu+'],
-                            title=f"Comparaison CU vs CU+ - {ong_selected}",
-                            barmode='group'
-                        )
-                        st.plotly_chart(fig_compare, use_container_width=True)
-                    
-                    with col2:
-                        plot_data['Tx_Accord_don'] = plot_data['Tx_Accord_don'].str.rstrip('%').astype(float)
-                        fig_taux = px.bar(
-                            plot_data,
-                            x='agent',
-                            y='Tx_Accord_don',
-                            title=f"Taux d'accord par agent - {ong_selected}",
-                            text=plot_data['Tx_Accord_don'].round(1).astype(str) + '%'
-                        )
-                        fig_taux.update_traces(textposition='outside')
-                        st.plotly_chart(fig_taux, use_container_width=True)
-                
-                # Onglet Tendances
-                with tabs[1]:
-                    fig_trends = create_performance_trends(filtered_export)
-                    if fig_trends is not None:
-                        st.plotly_chart(fig_trends, use_container_width=True)
-                
-                # Onglet Analyse Horaire
-                with tabs[2]:
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        metric_type = st.selectbox(
-                            "Type de métrique",
-                            ['Contacts Utiles', 'Contacts Positifs', 'PA en ligne', "Taux d'accord"],
-                            key="metric_type_hour"
-                        )
-                    
-                    # Convertir la sélection en code métrique
-                    metric_map = {
-                        'Contacts Utiles': 'cu',
-                        'Contacts Positifs': 'cu_plus',
-                        'PA en ligne': 'pa',
-                        "Taux d'accord": 'taux_accord'
-                    }
-                    selected_metric = metric_map[metric_type]
-                    
-                    # Créer et afficher la heatmap
-                    fig_heatmap = create_performance_heatmap(filtered_export, selected_metric)
-                    if fig_heatmap is not None:
-                        st.plotly_chart(fig_heatmap, use_container_width=True)
-                    
-                    hours_data = pd.to_datetime(filtered_export['CMK_S_FIELD_DATETRAITEMENT']).dt.hour.value_counts().sort_index()
-                    fig_hours = px.bar(
-                        x=hours_data.index,
-                        y=hours_data.values,
-                        title=f"Distribution horaire des appels - {ong_selected}",
-                        labels={'x': 'Heure', 'y': 'Nombre d\'appels'}
-                    )
-                    st.plotly_chart(fig_hours, use_container_width=True)
-                
-                # Onglet Conversion
-                with tabs[3]:
-                    fig_funnel = create_conversion_funnel(filtered_stats)
-                    if fig_funnel is not None:
-                        st.plotly_chart(fig_funnel, use_container_width=True)
-                    
-                    # Métriques de conversion
-                    conv_cols = st.columns(3)
-                    with conv_cols[0]:
-                        cu_plus = pd.to_numeric(filtered_stats['Total Cu+'].str.replace(',', ''))
-                        cu_total = pd.to_numeric(filtered_stats['Total Cu'].str.replace(',', ''))
-                        st.metric(
-                            "Taux de conversion global", 
-                            f"{(cu_plus.sum() / cu_total.sum() * 100):.1f}%"
-                        )
-                    with conv_cols[1]:
-                        pa_total = pd.to_numeric(filtered_stats['pa en ligne'].str.replace(',', ''))
-                        st.metric(
-                            "Taux de PA", 
-                            f"{(pa_total.sum() / cu_total.sum() * 100):.1f}%"
-                        )
-                    with conv_cols[2]:
-                        cus_h = pd.to_numeric(filtered_stats['Cu\'s/h'].str.replace(',', ''))
-                        st.metric(
-                            "Efficacité moyenne",
-                            f"{cus_h.mean():.2f} CU/h"
-                        )
-                
-                # Onglet Anomalies
-                with tabs[4]:
-                    metric = st.selectbox(
-                        "Sélectionner la métrique à analyser",
-                        ['Total Cu', 'Cu\'s/h', 'Tx_Accord_don'],
-                        key="anomaly_metric"
-                    )
-                    
-                    anomalies = detect_anomalies(filtered_stats, metric)
-                    if not anomalies.empty:
-                        st.warning(f"Détection de {len(anomalies)} anomalies pour {metric}")
-                        st.dataframe(
-                            anomalies[['agent', metric]],
-                            use_container_width=True
-                        )
-                        
-                        fig_anomalies = px.scatter(
-                            filtered_stats,
-                            x='agent',
-                            y=metric,
-                            color=filtered_stats.index.isin(anomalies.index),
-                            title=f"Distribution des valeurs et anomalies - {metric} - {ong_selected}",
-                            color_discrete_map={True: 'red', False: 'blue'}
-                        )
-                        st.plotly_chart(fig_anomalies, use_container_width=True)
-                    else:
-                        st.success("Aucune anomalie détectée !")
-                
     except Exception as e:
         st.error(f"❌ Une erreur s'est produite : {str(e)}")
-        import traceback
-        st.code(traceback.format_exc())
 else:
-    st.info("👈 Veuillez charger les fichiers GRH et Export dans la barre latérale pour commencer l'analyse.")
+    # Essayer de charger les dernières données depuis MongoDB
+    grh_data = db.get_latest_data('grh_data')
+    export_data = db.get_latest_data('export_data')
+    
+    if grh_data is not None and export_data is not None:
+        st.session_state['data'] = {
+            'grh': grh_data,
+            'export': export_data
+        }
+        st.info("📊 Données chargées depuis la base de données")
+    else:
+        st.info("👈 Veuillez charger les fichiers GRH et Export dans la barre latérale")

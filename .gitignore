@@ -1,0 +1,9 @@
+# Ignorer les vrais secrets mais pas l'exemple
+.streamlit/secrets.toml
+!.streamlit/secrets.toml.example
+
+# Autres fichiers à ignorer
+data/
+*.db
+__pycache__/
+*.pyc 
